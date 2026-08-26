@@ -1,0 +1,12 @@
+{
+  "ID": "1f6f5d02-8b95-4c58-9b46-9c2b1f8e9b25",
+  "ActionKeyword": "vm",
+  "Name": "VoiceMeeter Control",
+  "Description": "Control VoiceMeeter sources, buses and audio engine",
+  "Author": "pyu",
+  "Version": "0.2.0",
+  "Language": "csharp",
+  "Website": "https://github.com/pyu/Flow.Launcher.Plugin.VoiceMeeter",
+  "ExecuteFileName": "Flow.Launcher.Plugin.VoiceMeeter.dll",
+  "IcoPath": "Images\\voicemeeter.png"
+}
