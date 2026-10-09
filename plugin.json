@@ -4,7 +4,7 @@
   "Name": "VoiceMeeter Control",
   "Description": "Control VoiceMeeter sources, buses and audio engine",
   "Author": "pyu",
-  "Version": "0.2.0",
+  "Version": "0.2.5",
   "Language": "csharp",
   "Website": "https://github.com/pyu/Flow.Launcher.Plugin.VoiceMeeter",
   "ExecuteFileName": "Flow.Launcher.Plugin.VoiceMeeter.dll",

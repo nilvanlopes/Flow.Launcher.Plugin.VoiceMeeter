@@ -19,6 +19,7 @@ public sealed class VoiceMeeterPlugin : IPlugin, IContextMenu, IResultUpdated, I
     private VoiceMeeterRemoteClient? _remote;
     private AudioSessionController? _audioSessions;
     private Query? _activeSourceQuery;
+    private int? _pendingSetStripIndex;
 
     public event ResultUpdatedEventHandler? ResultsUpdated;
 
@@ -71,7 +72,11 @@ public sealed class VoiceMeeterPlugin : IPlugin, IContextMenu, IResultUpdated, I
             ActionResult(
                 "Definir volume",
                 "Enter para digitar um valor entre -60 e 12 dB",
-                () => NavigateTo($"vm source {index} set "),
+                () =>
+                {
+                    _pendingSetStripIndex = index;
+                    NavigateTo($"vm source {index + 1} set ");
+                },
                 closeAfterAction: false,
                 contextData: index,
                 addSelectedCount: false)
@@ -80,7 +85,8 @@ public sealed class VoiceMeeterPlugin : IPlugin, IContextMenu, IResultUpdated, I
 
     public List<Result> Query(Query query)
     {
-        var search = query.Search?.Trim() ?? string.Empty;
+        var search = GetEffectiveSearch(query);
+        _context?.API.LogInfo(nameof(VoiceMeeterPlugin), $"Query recebido: Search='{query.Search}', TrimmedQuery='{query.TrimmedQuery}', efetivo='{search}'", nameof(Query));
         try
         {
             EnsureRemote();
@@ -115,6 +121,20 @@ public sealed class VoiceMeeterPlugin : IPlugin, IContextMenu, IResultUpdated, I
             };
         }
 
+        // Depending on how the query was entered, Flow may pass the text
+        // after the action keyword without the literal "source" token.
+        // Normalize "vm 5 set -40" to the same source command as
+        // "vm source 5 set -40".
+        if (int.TryParse(tokens[0], out _) && tokens.Length > 1)
+        {
+            return BuildStripResults(new[] { "source" }.Concat(tokens).ToArray());
+        }
+
+        if (_pendingSetStripIndex is { } pendingIndex && tokens[0].ToLowerInvariant() is "set" or "definir")
+        {
+            return BuildSetStripGainResults(pendingIndex, new[] { "source", (pendingIndex + 1).ToString() }.Concat(tokens).ToArray());
+        }
+
         return tokens[0].ToLowerInvariant() switch
         {
             "restart" or "reiniciar" => new List<Result>
@@ -136,9 +156,35 @@ public sealed class VoiceMeeterPlugin : IPlugin, IContextMenu, IResultUpdated, I
         };
     }
 
+    private static string GetEffectiveSearch(Query query)
+    {
+        var search = query.Search?.Trim() ?? string.Empty;
+        var rawQuery = query.TrimmedQuery?.Trim() ?? string.Empty;
+
+        if (rawQuery.StartsWith("vm ", StringComparison.OrdinalIgnoreCase))
+        {
+            rawQuery = rawQuery[3..].Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(rawQuery))
+        {
+            var rawTokens = rawQuery.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (rawTokens.Length > 0 && (rawTokens[0].Equals("source", StringComparison.OrdinalIgnoreCase)
+                || rawTokens[0].Equals("sources", StringComparison.OrdinalIgnoreCase)
+                || rawTokens[0].Equals("fonte", StringComparison.OrdinalIgnoreCase)
+                || rawTokens[0].Equals("fontes", StringComparison.OrdinalIgnoreCase)
+                || int.TryParse(rawTokens[0], out _)))
+            {
+                return rawQuery;
+            }
+        }
+
+        return search;
+    }
+
     private List<Result> BuildStripResults(string[] tokens)
     {
-        var index = ParseIndex(tokens, 1);
+        var index = ParseSourceIndex(tokens, 1);
         if (index is null)
         {
             return Enumerable.Range(0, 8)
@@ -149,8 +195,8 @@ public sealed class VoiceMeeterPlugin : IPlugin, IContextMenu, IResultUpdated, I
         var operation = tokens.Length > 2 ? tokens[2].ToLowerInvariant() : "toggle";
         return operation switch
         {
-            "+" or "up" or "mais" => new List<Result> { ActionResult($"Fonte {index}: aumentar volume", "+3 dB", () => ChangeStripGain(index.Value, VolumeStepDb)) },
-            "-" or "down" or "menos" => new List<Result> { ActionResult($"Fonte {index}: reduzir volume", "-3 dB", () => ChangeStripGain(index.Value, -VolumeStepDb)) },
+            "+" or "up" or "mais" => new List<Result> { ActionResult($"Fonte {index.Value + 1}: aumentar volume", "+3 dB", () => ChangeStripGain(index.Value, VolumeStepDb)) },
+            "-" or "down" or "menos" => new List<Result> { ActionResult($"Fonte {index.Value + 1}: reduzir volume", "-3 dB", () => ChangeStripGain(index.Value, -VolumeStepDb)) },
             "set" or "definir" => BuildSetStripGainResults(index.Value, tokens),
             _ => new List<Result> { BuildStripResult(index.Value) }
         };
@@ -158,25 +204,39 @@ public sealed class VoiceMeeterPlugin : IPlugin, IContextMenu, IResultUpdated, I
 
     private List<Result> BuildSetStripGainResults(int index, string[] tokens)
     {
-        if (tokens.Length <= 3 || !float.TryParse(tokens[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var gain))
+        if (tokens.Length <= 3)
         {
             return new List<Result>
             {
                 ActionResult(
-                    $"Fonte {index}: definir volume",
+                    $"Fonte {index + 1}: definir volume",
                     "Digite um valor entre -60 e 12 dB e pressione Enter",
-                    () => NavigateTo($"vm source {index} set "),
-                    closeAfterAction: false)
+                    () => NavigateTo($"vm source {index + 1} set "),
+                    closeAfterAction: false,
+                    score: 1000,
+                    addSelectedCount: false)
             };
         }
 
-        var clampedGain = Math.Clamp(gain, -60f, 12f);
+        var rawGain = tokens[3].Replace(',', '.');
+        if (!float.TryParse(rawGain, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var gain))
+        {
+            return Error($"Valor inválido: {tokens[3]}", "Use um número entre -60 e 12 dB.");
+        }
+
+        if (gain is < -60f or > 12f)
+        {
+            return Error($"Valor fora do limite: {gain:0.#} dB", "O volume deve estar entre -60 e 12 dB.");
+        }
+
         return new List<Result>
         {
             ActionResult(
-                $"Fonte {index}: definir volume em {clampedGain:0.#} dB",
+                $"Fonte {index + 1}: definir volume em {gain:0.#} dB",
                 "Pressione Enter para aplicar",
-                () => SetStripGain(index, clampedGain))
+                () => SetStripGain(index, gain),
+                score: 1000,
+                addSelectedCount: false)
         };
     }
 
@@ -386,6 +446,7 @@ public sealed class VoiceMeeterPlugin : IPlugin, IContextMenu, IResultUpdated, I
     private void SetStripGain(int index, float gainDb)
     {
         _remote!.SetStripGain(index, gainDb);
+        _pendingSetStripIndex = null;
         PublishSourceResults();
     }
 
@@ -427,6 +488,16 @@ public sealed class VoiceMeeterPlugin : IPlugin, IContextMenu, IResultUpdated, I
         }
 
         return index is >= 0 and < 8 ? index : null;
+    }
+
+    private static int? ParseSourceIndex(string[] tokens, int position)
+    {
+        if (tokens.Length <= position || !int.TryParse(tokens[position], out var sourceNumber))
+        {
+            return null;
+        }
+
+        return sourceNumber is >= 1 and <= 8 ? sourceNumber - 1 : null;
     }
 
     private static Result ActionResult(string title, string subtitle, Action action, bool closeAfterAction = true, int score = 0, bool addSelectedCount = true, object? contextData = null) => new()
